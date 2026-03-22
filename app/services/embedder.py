@@ -19,10 +19,10 @@ class EmbeddingService:
     without GPU/model downloads in CI/testing environments.
     """
 
-    def __init__(self, model_name: str | None = None) -> None:
+    def __init__(self, model_name: str | None = None, simulate: bool = False) -> None:
         self._model_name = model_name or settings.embedding_model
         self._model = None
-        self._use_simulation = False
+        self._use_simulation = simulate
         self._dim = settings.embedding_dim
 
     # ------------------------------------------------------------------

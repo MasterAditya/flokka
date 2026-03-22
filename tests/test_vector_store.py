@@ -17,7 +17,7 @@ def memory_store() -> VectorStore:
 @pytest.fixture
 def sample_chunks() -> list[DocumentChunk]:
     """Pre-built chunks with simulated embeddings."""
-    embedder = EmbeddingService()
+    embedder = EmbeddingService(simulate=True)
     chunker = TextChunker()
     text = "The Flokka ingestion engine processes documents efficiently. " * 10
     config = ChunkConfig(chunk_size=100, chunk_overlap=20, strategy="overlap")
@@ -58,7 +58,7 @@ class TestVectorStoreQuery:
         self, memory_store: VectorStore, sample_chunks: list[DocumentChunk]
     ) -> None:
         memory_store.upsert_chunks(sample_chunks)
-        embedder = EmbeddingService()
+        embedder = EmbeddingService(simulate=True)
         query_vec = embedder.embed_query("ingestion engine")
         results = memory_store.query(query_vec, n_results=3)
         assert len(results) <= 3
@@ -68,7 +68,7 @@ class TestVectorStoreQuery:
         self, memory_store: VectorStore, sample_chunks: list[DocumentChunk]
     ) -> None:
         memory_store.upsert_chunks(sample_chunks)
-        embedder = EmbeddingService()
+        embedder = EmbeddingService(simulate=True)
         query_vec = embedder.embed_query("document processing")
         results = memory_store.query(query_vec, n_results=1)
         assert len(results) >= 1
@@ -92,7 +92,7 @@ class TestVectorStoreDelete:
 class TestEmbeddingService:
     def test_embed_chunks_attaches_embeddings(self) -> None:
         chunker = TextChunker()
-        embedder = EmbeddingService()
+        embedder = EmbeddingService(simulate=True)
         text = "Test embedding generation for chunks." * 5
         config = ChunkConfig(chunk_size=50, chunk_overlap=0, strategy="fixed")
         chunks = chunker.chunk(text, "doc1", "job1", "test.txt", config)
@@ -102,20 +102,20 @@ class TestEmbeddingService:
             assert len(chunk.embedding) > 0
 
     def test_embed_query_returns_vector(self) -> None:
-        embedder = EmbeddingService()
+        embedder = EmbeddingService(simulate=True)
         vec = embedder.embed_query("sample query")
         assert isinstance(vec, list)
         assert len(vec) > 0
         assert all(isinstance(v, float) for v in vec)
 
     def test_simulated_embedding_is_deterministic(self) -> None:
-        embedder = EmbeddingService()
+        embedder = EmbeddingService(simulate=True)
         vec1 = embedder._simulated_embedding("hello world")
         vec2 = embedder._simulated_embedding("hello world")
         assert vec1 == vec2
 
     def test_simulated_embeddings_differ_for_different_texts(self) -> None:
-        embedder = EmbeddingService()
+        embedder = EmbeddingService(simulate=True)
         vec1 = embedder._simulated_embedding("hello")
         vec2 = embedder._simulated_embedding("world")
         assert vec1 != vec2
