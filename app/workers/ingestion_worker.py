@@ -1,5 +1,6 @@
-"""Ingestion worker: text extraction and chunking."""
+"""Ingestion worker: text extraction and chunking (pipeline stage 1)."""
 
+import base64
 import logging
 
 from app.models.document import JobStatus
@@ -23,22 +24,23 @@ def ingest_document(
     chunk_overlap: int = 64,
 ) -> dict:
     """
-    Stage 1 – Extract text and split into chunks.
+    Stage 1 — decode the uploaded file, extract text, and split into chunks.
 
-    Chains to embed_chunks on success.
+    Chains to ``workers.embed_chunks`` on success.
     """
-    import base64  # noqa: PLC0415
-
-    logger.info("Starting ingestion for job %s (file=%r)", job_id, filename)
+    logger.info("Ingestion started: job=%s file=%r", job_id, filename)
 
     try:
         content = base64.b64decode(content_b64)
 
         extractor = TextExtractor()
-        text, extract_ms = measure_ms(
-            extractor.extract, content, filename, content_type
+        text, extract_ms = measure_ms(extractor.extract, content, filename, content_type)
+        logger.info(
+            "Extraction complete: job=%s chars=%d duration_ms=%.2f",
+            job_id,
+            len(text),
+            extract_ms,
         )
-        logger.info("Extracted %d chars in %.2f ms", len(text), extract_ms)
 
         chunker = TextChunker()
         config = ChunkConfig(
@@ -49,13 +51,17 @@ def ingest_document(
         chunks, chunk_ms = measure_ms(
             chunker.chunk, text, document_id, job_id, filename, config
         )
-        logger.info("Created %d chunks in %.2f ms", len(chunks), chunk_ms)
+        logger.info(
+            "Chunking complete: job=%s chunks=%d duration_ms=%.2f",
+            job_id,
+            len(chunks),
+            chunk_ms,
+        )
 
-        # Pass serialised chunks to the next worker
-        chunks_data = [c.model_dump() for c in chunks]
-
-        # Chain to embedding worker
-        embed_chunks.delay(job_id=job_id, chunks_data=chunks_data)
+        celery_app.send_task(
+            "workers.embed_chunks",
+            kwargs={"job_id": job_id, "chunks_data": [c.model_dump() for c in chunks]},
+        )
 
         return {
             "job_id": job_id,
@@ -65,10 +71,10 @@ def ingest_document(
             "chunk_ms": chunk_ms,
         }
 
+    except (ValueError, ImportError) as exc:
+        # Non-retryable: bad file format or missing optional dependency.
+        logger.error("Ingestion permanently failed: job=%s reason=%s", job_id, exc)
+        raise
     except Exception as exc:
-        logger.exception("Ingestion failed for job %s: %s", job_id, exc)
+        logger.exception("Ingestion failed (will retry): job=%s", job_id)
         raise self.retry(exc=exc, countdown=5)
-
-
-# Avoid circular import – import here to enable .delay()
-from app.workers.embedding_worker import embed_chunks  # noqa: E402

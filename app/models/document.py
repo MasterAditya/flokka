@@ -1,9 +1,8 @@
 """Document domain models."""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -24,11 +23,11 @@ class IngestionJob(BaseModel):
     filename: str
     content_type: str
     status: JobStatus = JobStatus.PENDING
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    error: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    error: str | None = None
     chunk_count: int = 0
-    processing_time_ms: Optional[float] = None
+    processing_time_ms: float | None = None
 
 
 class IngestionRequest(BaseModel):

@@ -1,4 +1,4 @@
-"""Document ingestion API endpoint."""
+"""Document ingestion API endpoints."""
 
 import base64
 import logging
@@ -8,18 +8,22 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 
 from app.core.config import settings
 from app.models.document import IngestionJob, IngestionResponse, JobStatus
+from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
 
-ALLOWED_CONTENT_TYPES = {
-    "text/plain",
-    "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-}
+ALLOWED_CONTENT_TYPES = frozenset(
+    {
+        "text/plain",
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+)
+ALLOWED_EXTENSIONS = frozenset({".txt", ".pdf", ".docx"})
 
-# In-memory job store (replace with Redis/DB in production)
+# In-memory job registry (P0: replace with Redis hash before multi-replica deploy).
 _jobs: dict[str, IngestionJob] = {}
 
 
@@ -30,7 +34,8 @@ _jobs: dict[str, IngestionJob] = {}
     summary="Upload a document for ingestion",
     description=(
         "Upload a .txt, .pdf or .docx file. "
-        "Returns an ingestion job ID for status tracking."
+        "The document is queued for background processing; use the returned "
+        "``job_id`` to poll for status."
     ),
 )
 async def ingest_document(
@@ -38,11 +43,11 @@ async def ingest_document(
     chunk_size: int = Form(default=512, ge=64, le=4096),
     chunk_overlap: int = Form(default=64, ge=0, le=512),
 ) -> IngestionResponse:
-    """Accept a document upload and queue it for background processing."""
-    _validate_file(file)
+    """Accept a document upload and enqueue it for background processing."""
+    _validate_file_type(file)
 
     content = await file.read()
-    _validate_size(content, file.filename or "unknown")
+    _validate_file_size(content, file.filename or "unknown")
 
     job = IngestionJob(
         filename=file.filename or "unknown",
@@ -51,21 +56,21 @@ async def ingest_document(
     _jobs[job.job_id] = job
 
     logger.info(
-        "Queued ingestion job %s for file %r (%d bytes)",
+        "Ingestion job created: job=%s document=%s file=%r bytes=%d",
         job.job_id,
+        job.document_id,
         file.filename,
         len(content),
     )
 
-    # Dispatch Celery task (best-effort; log and continue if broker unavailable)
-    _dispatch_task(job, content, chunk_size, chunk_overlap)
+    _enqueue(job, content, chunk_size, chunk_overlap)
 
     return IngestionResponse(
         job_id=job.job_id,
         document_id=job.document_id,
         filename=job.filename,
         status=job.status,
-        message="Document queued for ingestion. Use job_id to track status.",
+        message="Document queued for ingestion. Use job_id to poll for status.",
     )
 
 
@@ -75,7 +80,7 @@ async def ingest_document(
     summary="Get ingestion job status",
 )
 async def get_job_status(job_id: str) -> IngestionJob:
-    """Return the current status of an ingestion job."""
+    """Return the current state of an ingestion job."""
     job = _jobs.get(job_id)
     if job is None:
         raise HTTPException(
@@ -85,63 +90,53 @@ async def get_job_status(job_id: str) -> IngestionJob:
     return job
 
 
-# ------------------------------------------------------------------
-# Private helpers
-# ------------------------------------------------------------------
-
-
-def _validate_file(file: UploadFile) -> None:
+def _validate_file_type(file: UploadFile) -> None:
     content_type = file.content_type or ""
-    filename = file.filename or ""
-    ext = Path(filename).suffix.lower()
-
-    # Accept by MIME type or by extension when MIME is octet-stream
-    allowed_exts = {".txt", ".pdf", ".docx"}
-    if content_type not in ALLOWED_CONTENT_TYPES and ext not in allowed_exts:
+    ext = Path(file.filename or "").suffix.lower()
+    if content_type not in ALLOWED_CONTENT_TYPES and ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail=(
-                f"Unsupported file type: {content_type!r}. "
-                "Allowed: .txt, .pdf, .docx"
+                f"Unsupported file type: content_type={content_type!r}, "
+                f"extension={ext!r}. Accepted: .txt, .pdf, .docx"
             ),
         )
 
 
-def _validate_size(content: bytes, filename: str) -> None:
+def _validate_file_size(content: bytes, filename: str) -> None:
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
     if len(content) > max_bytes:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=(
-                f"File {filename!r} exceeds maximum size of "
-                f"{settings.max_upload_size_mb} MB."
+                f"File {filename!r} ({len(content)} bytes) exceeds the "
+                f"{settings.max_upload_size_mb} MB upload limit."
             ),
         )
 
 
-def _dispatch_task(
+def _enqueue(
     job: IngestionJob, content: bytes, chunk_size: int, chunk_overlap: int
 ) -> None:
-    """Send the ingestion task to Celery (non-blocking, best-effort)."""
+    """Send the ingestion task to the Celery broker (best-effort)."""
     try:
-        from app.workers.ingestion_worker import ingest_document  # noqa: PLC0415
-
-        content_b64 = base64.b64encode(content).decode()
-        ingest_document.delay(
-            job_id=job.job_id,
-            document_id=job.document_id,
-            filename=job.filename,
-            content_type=job.content_type,
-            content_b64=content_b64,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
+        celery_app.send_task(
+            "workers.ingest_document",
+            kwargs={
+                "job_id": job.job_id,
+                "document_id": job.document_id,
+                "filename": job.filename,
+                "content_type": job.content_type,
+                "content_b64": base64.b64encode(content).decode(),
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+            },
         )
         job.status = JobStatus.PENDING
-        logger.debug("Task dispatched for job %s", job.job_id)
+        logger.debug("Task enqueued: job=%s", job.job_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "Could not dispatch Celery task for job %s: %s. "
-            "Processing will not occur until broker is available.",
+            "Broker unavailable — task not enqueued: job=%s error=%s",
             job.job_id,
             exc,
         )

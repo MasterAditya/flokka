@@ -1,32 +1,30 @@
-"""Structured logging configuration."""
+"""Application logging configuration."""
 
 import logging
 import sys
 
 
 def configure_logging(log_level: str = "INFO") -> None:
-    """Configure application-wide logging."""
+    """
+    Configure root logger with a structured, human-readable format.
+
+    Should be called once at application startup before any loggers are used.
+    """
     level = getattr(logging, log_level.upper(), logging.INFO)
 
-    formatter = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logging.Formatter(
+            fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
     )
 
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.handlers.clear()
+    root.addHandler(handler)
 
-    root_logger = logging.getLogger()
-    root_logger.setLevel(level)
-    root_logger.handlers.clear()
-    root_logger.addHandler(handler)
-
-    # Suppress noisy third-party loggers
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("chromadb").setLevel(logging.WARNING)
-    logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
-
-
-def get_logger(name: str) -> logging.Logger:
-    """Return a named logger."""
-    return logging.getLogger(name)
+    # Suppress noisy third-party loggers at WARNING and above only.
+    for noisy in ("httpx", "chromadb", "sentence_transformers"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)

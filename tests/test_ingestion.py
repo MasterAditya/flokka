@@ -1,93 +1,97 @@
-"""Tests for the ingestion API endpoint."""
+"""Tests for the document ingestion API."""
 
 import io
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
 from app.models.document import JobStatus
 
 
-@pytest.fixture(scope="module")
-def client() -> TestClient:
-    return TestClient(app)
-
-
 class TestHealthEndpoint:
-    def test_health_returns_ok(self, client: TestClient) -> None:
+    def test_returns_200_with_status_ok(self, client: TestClient) -> None:
         response = client.get("/health")
         assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "ok"
-        assert "version" in data
+        body = response.json()
+        assert body["status"] == "ok"
+        assert "version" in body
 
 
 class TestIngestEndpoint:
-    def test_ingest_txt_returns_202(self, client: TestClient) -> None:
-        content = b"Hello, this is a test document.\n" * 30
+    """Tests for POST /api/v1/ingest/."""
+
+    def test_txt_upload_returns_202(
+        self, client: TestClient, mock_celery
+    ) -> None:
         response = client.post(
             "/api/v1/ingest/",
-            files={"file": ("test.txt", io.BytesIO(content), "text/plain")},
+            files={"file": ("report.txt", io.BytesIO(b"Hello world.\n" * 40), "text/plain")},
             data={"chunk_size": "256", "chunk_overlap": "32"},
         )
         assert response.status_code == 202
-        data = response.json()
-        assert "job_id" in data
-        assert "document_id" in data
-        assert data["filename"] == "test.txt"
-        assert data["status"] == JobStatus.PENDING
 
-    def test_ingest_returns_job_id(self, client: TestClient) -> None:
-        content = b"Sample text for ingestion testing." * 20
+    def test_response_contains_required_fields(
+        self, client: TestClient, mock_celery
+    ) -> None:
         response = client.post(
             "/api/v1/ingest/",
-            files={"file": ("doc.txt", io.BytesIO(content), "text/plain")},
+            files={"file": ("doc.txt", io.BytesIO(b"Sample text." * 20), "text/plain")},
         )
         assert response.status_code == 202
-        data = response.json()
-        assert isinstance(data["job_id"], str)
-        assert len(data["job_id"]) > 0
+        body = response.json()
+        assert isinstance(body["job_id"], str) and body["job_id"]
+        assert isinstance(body["document_id"], str) and body["document_id"]
+        assert body["filename"] == "doc.txt"
+        assert body["status"] == JobStatus.PENDING
+        assert "message" in body
 
-    def test_ingest_unsupported_type_returns_415(self, client: TestClient) -> None:
-        content = b"<html><body>Not a doc</body></html>"
+    def test_unsupported_mime_type_returns_415(
+        self, client: TestClient, mock_celery
+    ) -> None:
         response = client.post(
             "/api/v1/ingest/",
-            files={"file": ("page.html", io.BytesIO(content), "text/html")},
+            files={"file": ("page.html", io.BytesIO(b"<html/>"), "text/html")},
         )
         assert response.status_code == 415
 
-    def test_ingest_stores_job_retrievable(self, client: TestClient) -> None:
-        content = b"Document for status check." * 10
-        post_response = client.post(
+    def test_job_is_retrievable_after_upload(
+        self, client: TestClient, mock_celery
+    ) -> None:
+        upload = client.post(
             "/api/v1/ingest/",
-            files={"file": ("status_test.txt", io.BytesIO(content), "text/plain")},
+            files={
+                "file": ("check.txt", io.BytesIO(b"Status check document." * 10), "text/plain")
+            },
         )
-        assert post_response.status_code == 202
-        job_id = post_response.json()["job_id"]
+        assert upload.status_code == 202
+        job_id = upload.json()["job_id"]
 
-        get_response = client.get(f"/api/v1/ingest/{job_id}")
-        assert get_response.status_code == 200
-        job_data = get_response.json()
-        assert job_data["job_id"] == job_id
+        status_response = client.get(f"/api/v1/ingest/{job_id}")
+        assert status_response.status_code == 200
+        assert status_response.json()["job_id"] == job_id
 
-    def test_get_unknown_job_returns_404(self, client: TestClient) -> None:
-        response = client.get("/api/v1/ingest/nonexistent-job-id")
+    def test_unknown_job_id_returns_404(self, client: TestClient) -> None:
+        response = client.get("/api/v1/ingest/00000000-0000-0000-0000-000000000000")
         assert response.status_code == 404
 
-    def test_ingest_default_chunk_params(self, client: TestClient) -> None:
-        content = b"Default params document." * 20
+    @pytest.mark.parametrize(
+        "chunk_size,chunk_overlap",
+        [
+            (64, 0),
+            (512, 64),
+            (4096, 512),
+        ],
+    )
+    def test_accepts_valid_chunk_parameters(
+        self,
+        client: TestClient,
+        mock_celery,
+        chunk_size: int,
+        chunk_overlap: int,
+    ) -> None:
         response = client.post(
             "/api/v1/ingest/",
-            files={"file": ("defaults.txt", io.BytesIO(content), "text/plain")},
+            files={"file": ("param.txt", io.BytesIO(b"Params test." * 20), "text/plain")},
+            data={"chunk_size": str(chunk_size), "chunk_overlap": str(chunk_overlap)},
         )
         assert response.status_code == 202
-
-    def test_message_included_in_response(self, client: TestClient) -> None:
-        content = b"Message check document." * 10
-        response = client.post(
-            "/api/v1/ingest/",
-            files={"file": ("msg.txt", io.BytesIO(content), "text/plain")},
-        )
-        assert response.status_code == 202
-        assert "message" in response.json()

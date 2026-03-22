@@ -1,4 +1,4 @@
-"""Tests for the vector store service."""
+"""Tests for the vector store service and embedding service."""
 
 import pytest
 
@@ -9,113 +9,94 @@ from app.services.vector_store import VectorStore
 
 
 @pytest.fixture
-def memory_store() -> VectorStore:
-    """In-memory ChromaDB store for tests."""
+def store() -> VectorStore:
+    """Isolated in-memory ChromaDB collection for each test."""
     return VectorStore(host="memory", collection_name="test_collection")
 
 
 @pytest.fixture
-def sample_chunks() -> list[DocumentChunk]:
-    """Pre-built chunks with simulated embeddings."""
-    embedder = EmbeddingService(simulate=True)
-    chunker = TextChunker()
+def embedded_chunks() -> list[DocumentChunk]:
+    """A small set of chunks with simulated embeddings for vector store tests."""
     text = "The Flokka ingestion engine processes documents efficiently. " * 10
     config = ChunkConfig(chunk_size=100, chunk_overlap=20, strategy="overlap")
-    chunks = chunker.chunk(text, "doc-vs-001", "job-vs-001", "sample.txt", config)
-    return embedder.embed_chunks(chunks)
+    chunks = TextChunker().chunk(text, "doc-vs-001", "job-vs-001", "sample.txt", config)
+    return EmbeddingService(simulate=True).embed_chunks(chunks)
 
 
-class TestVectorStoreUpsert:
-    def test_upsert_returns_chunk_count(
-        self, memory_store: VectorStore, sample_chunks: list[DocumentChunk]
+class TestUpsert:
+    def test_returns_stored_count(
+        self, store: VectorStore, embedded_chunks: list[DocumentChunk]
     ) -> None:
-        stored = memory_store.upsert_chunks(sample_chunks)
-        assert stored == len(sample_chunks)
+        assert store.upsert_chunks(embedded_chunks) == len(embedded_chunks)
 
-    def test_upsert_empty_list_returns_zero(self, memory_store: VectorStore) -> None:
-        assert memory_store.upsert_chunks([]) == 0
+    def test_empty_list_is_noop(self, store: VectorStore) -> None:
+        assert store.upsert_chunks([]) == 0
 
-    def test_count_increases_after_upsert(
-        self, memory_store: VectorStore, sample_chunks: list[DocumentChunk]
+    def test_collection_grows_after_upsert(
+        self, store: VectorStore, embedded_chunks: list[DocumentChunk]
     ) -> None:
-        before = memory_store.count()
-        memory_store.upsert_chunks(sample_chunks)
-        after = memory_store.count()
-        assert after == before + len(sample_chunks)
+        before = store.count()
+        store.upsert_chunks(embedded_chunks)
+        assert store.count() == before + len(embedded_chunks)
 
     def test_upsert_is_idempotent(
-        self, memory_store: VectorStore, sample_chunks: list[DocumentChunk]
+        self, store: VectorStore, embedded_chunks: list[DocumentChunk]
     ) -> None:
-        memory_store.upsert_chunks(sample_chunks)
-        count_after_first = memory_store.count()
-        memory_store.upsert_chunks(sample_chunks)  # Same chunks, same IDs
-        count_after_second = memory_store.count()
-        assert count_after_first == count_after_second
+        store.upsert_chunks(embedded_chunks)
+        count_after_first = store.count()
+        store.upsert_chunks(embedded_chunks)
+        assert store.count() == count_after_first
 
 
-class TestVectorStoreQuery:
-    def test_query_returns_results(
-        self, memory_store: VectorStore, sample_chunks: list[DocumentChunk]
+class TestQuery:
+    def test_returns_at_most_n_results(
+        self, store: VectorStore, embedded_chunks: list[DocumentChunk]
     ) -> None:
-        memory_store.upsert_chunks(sample_chunks)
-        embedder = EmbeddingService(simulate=True)
-        query_vec = embedder.embed_query("ingestion engine")
-        results = memory_store.query(query_vec, n_results=3)
+        store.upsert_chunks(embedded_chunks)
+        query_vec = EmbeddingService(simulate=True).embed_query("ingestion engine")
+        results = store.query(query_vec, n_results=3)
         assert len(results) <= 3
-        assert all("text" in r and "metadata" in r and "distance" in r for r in results)
 
-    def test_query_result_has_expected_keys(
-        self, memory_store: VectorStore, sample_chunks: list[DocumentChunk]
+    def test_result_shape(
+        self, store: VectorStore, embedded_chunks: list[DocumentChunk]
     ) -> None:
-        memory_store.upsert_chunks(sample_chunks)
-        embedder = EmbeddingService(simulate=True)
-        query_vec = embedder.embed_query("document processing")
-        results = memory_store.query(query_vec, n_results=1)
-        assert len(results) >= 1
-        result = results[0]
-        assert "text" in result
-        assert "metadata" in result
-        assert "distance" in result
+        store.upsert_chunks(embedded_chunks)
+        query_vec = EmbeddingService(simulate=True).embed_query("document processing")
+        results = store.query(query_vec, n_results=1)
+        assert results
+        assert {"text", "metadata", "distance"} <= results[0].keys()
 
 
-class TestVectorStoreDelete:
-    def test_delete_removes_document_chunks(
-        self, memory_store: VectorStore, sample_chunks: list[DocumentChunk]
+class TestDelete:
+    def test_removes_chunks_for_document(
+        self, store: VectorStore, embedded_chunks: list[DocumentChunk]
     ) -> None:
-        memory_store.upsert_chunks(sample_chunks)
-        count_before = memory_store.count()
-        memory_store.delete_document("doc-vs-001")
-        count_after = memory_store.count()
-        assert count_after < count_before
+        store.upsert_chunks(embedded_chunks)
+        before = store.count()
+        store.delete_document("doc-vs-001")
+        assert store.count() < before
 
 
 class TestEmbeddingService:
-    def test_embed_chunks_attaches_embeddings(self) -> None:
-        chunker = TextChunker()
-        embedder = EmbeddingService(simulate=True)
-        text = "Test embedding generation for chunks." * 5
+    def test_chunks_receive_embeddings(self) -> None:
+        text = "Embedding test document content." * 5
         config = ChunkConfig(chunk_size=50, chunk_overlap=0, strategy="fixed")
-        chunks = chunker.chunk(text, "doc1", "job1", "test.txt", config)
-        embedded = embedder.embed_chunks(chunks)
+        chunks = TextChunker().chunk(text, "doc1", "job1", "test.txt", config)
+        embedded = EmbeddingService(simulate=True).embed_chunks(chunks)
         for chunk in embedded:
             assert chunk.embedding is not None
             assert len(chunk.embedding) > 0
 
-    def test_embed_query_returns_vector(self) -> None:
-        embedder = EmbeddingService(simulate=True)
-        vec = embedder.embed_query("sample query")
+    def test_query_embedding_is_float_vector(self) -> None:
+        vec = EmbeddingService(simulate=True).embed_query("sample query")
         assert isinstance(vec, list)
-        assert len(vec) > 0
+        assert vec
         assert all(isinstance(v, float) for v in vec)
 
-    def test_simulated_embedding_is_deterministic(self) -> None:
-        embedder = EmbeddingService(simulate=True)
-        vec1 = embedder._simulated_embedding("hello world")
-        vec2 = embedder._simulated_embedding("hello world")
-        assert vec1 == vec2
+    def test_same_text_produces_identical_embedding(self) -> None:
+        svc = EmbeddingService(simulate=True)
+        assert svc.embed_query("hello world") == svc.embed_query("hello world")
 
-    def test_simulated_embeddings_differ_for_different_texts(self) -> None:
-        embedder = EmbeddingService(simulate=True)
-        vec1 = embedder._simulated_embedding("hello")
-        vec2 = embedder._simulated_embedding("world")
-        assert vec1 != vec2
+    def test_different_texts_produce_different_embeddings(self) -> None:
+        svc = EmbeddingService(simulate=True)
+        assert svc.embed_query("hello") != svc.embed_query("world")

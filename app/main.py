@@ -1,4 +1,4 @@
-"""FastAPI application entry point."""
+"""FastAPI application factory."""
 
 import logging
 
@@ -9,19 +9,19 @@ from app.api.routes.ingestion import router as ingestion_router
 from app.core.config import settings
 from app.core.logging_config import configure_logging
 
-configure_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
-    """Application factory."""
+    """Construct and configure the FastAPI application."""
+    configure_logging(settings.log_level)
+
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,
         description=(
-            "A production-style document ingestion pipeline that processes "
-            "documents into semantic chunks, generates embeddings, and stores "
-            "them in a vector database for retrieval."
+            "Async document ingestion pipeline: upload → extract → chunk → "
+            "embed → store in vector DB for downstream RAG retrieval."
         ),
         docs_url="/docs",
         redoc_url="/redoc",
@@ -41,7 +41,9 @@ def create_app() -> FastAPI:
     async def health() -> dict:
         return {"status": "ok", "version": settings.app_version}
 
-    logger.info("Application %s v%s ready", settings.app_name, settings.app_version)
+    logger.info(
+        "Application started: name=%r version=%s", settings.app_name, settings.app_version
+    )
     return app
 
 

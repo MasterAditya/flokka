@@ -1,6 +1,7 @@
 """Chunk domain models."""
 
-from typing import Any, Optional
+import uuid
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -19,14 +20,14 @@ class ChunkMetadata(BaseModel):
 
 
 class DocumentChunk(BaseModel):
-    chunk_id: str = Field(default_factory=lambda: __import__("uuid").uuid4().hex)
+    chunk_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     document_id: str
     text: str
-    embedding: Optional[list[float]] = None
+    embedding: list[float] | None = None
     metadata: ChunkMetadata
 
     def to_chroma_dict(self) -> dict[str, Any]:
-        """Convert chunk to ChromaDB insertion format."""
+        """Serialise to the shape expected by ChromaDB's upsert API."""
         return {
             "id": self.chunk_id,
             "document": self.text,

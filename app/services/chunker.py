@@ -17,10 +17,14 @@ class ChunkConfig:
 
 class TextChunker:
     """
-    Splits text into chunks using fixed-size or overlap strategies.
+    Splits plain text into overlapping or fixed-size chunks.
 
-    Fixed-size: non-overlapping chunks of exactly `chunk_size` chars.
-    Overlap: sliding window chunks with `chunk_overlap` char overlap.
+    Fixed-size strategy: non-overlapping windows of exactly *chunk_size*
+    characters (last chunk may be shorter).
+
+    Overlap strategy: sliding window of *chunk_size* characters advancing
+    by ``chunk_size - chunk_overlap`` characters per step, so each pair of
+    consecutive chunks shares *chunk_overlap* characters.
     """
 
     def chunk(
@@ -32,54 +36,52 @@ class TextChunker:
         config: ChunkConfig | None = None,
     ) -> list[DocumentChunk]:
         """
-        Split *text* into DocumentChunk objects.
+        Split *text* into :class:`DocumentChunk` objects with full metadata.
 
         Args:
             text: Source text to split.
-            document_id: Parent document identifier.
-            job_id: Ingestion job identifier.
-            filename: Original filename for metadata.
-            config: Chunking configuration; uses defaults if None.
+            document_id: Identifier of the parent document.
+            job_id: Identifier of the ingestion job.
+            filename: Original filename, recorded in chunk metadata.
+            config: Chunking parameters; defaults are used when ``None``.
 
         Returns:
-            List of DocumentChunk instances with metadata.
+            Ordered list of chunks covering the entire input text.
+
+        Raises:
+            ValueError: If ``chunk_overlap >= chunk_size`` for the overlap strategy.
         """
         if config is None:
             config = ChunkConfig()
 
         if config.strategy == "fixed":
-            raw_chunks = self._fixed_chunks(text, config.chunk_size)
+            windows = self._fixed_windows(text, config.chunk_size)
         else:
-            raw_chunks = self._overlap_chunks(
-                text, config.chunk_size, config.chunk_overlap
-            )
+            windows = self._overlap_windows(text, config.chunk_size, config.chunk_overlap)
 
-        total = len(raw_chunks)
-        chunks: list[DocumentChunk] = []
-
-        for idx, (start, end, chunk_text) in enumerate(raw_chunks):
-            metadata = ChunkMetadata(
+        total = len(windows)
+        chunks = [
+            DocumentChunk(
                 document_id=document_id,
-                job_id=job_id,
-                filename=filename,
-                chunk_index=idx,
-                total_chunks=total,
-                start_char=start,
-                end_char=end,
-                chunk_size=config.chunk_size,
-                overlap=config.chunk_overlap,
-                strategy=config.strategy,
-            )
-            chunks.append(
-                DocumentChunk(
+                text=chunk_text,
+                metadata=ChunkMetadata(
                     document_id=document_id,
-                    text=chunk_text,
-                    metadata=metadata,
-                )
+                    job_id=job_id,
+                    filename=filename,
+                    chunk_index=idx,
+                    total_chunks=total,
+                    start_char=start,
+                    end_char=end,
+                    chunk_size=config.chunk_size,
+                    overlap=config.chunk_overlap,
+                    strategy=config.strategy,
+                ),
             )
+            for idx, (start, end, chunk_text) in enumerate(windows)
+        ]
 
         logger.info(
-            "Chunked document %r into %d chunks (strategy=%s, size=%d, overlap=%d)",
+            "Chunked document %r: chunks=%d strategy=%s size=%d overlap=%d",
             document_id,
             total,
             config.strategy,
@@ -88,21 +90,17 @@ class TextChunker:
         )
         return chunks
 
-    # ------------------------------------------------------------------
-    # Private chunking algorithms
-    # ------------------------------------------------------------------
-
-    def _fixed_chunks(self, text: str, size: int) -> list[tuple[int, int, str]]:
-        """Non-overlapping fixed-size chunks."""
-        results: list[tuple[int, int, str]] = []
+    def _fixed_windows(self, text: str, size: int) -> list[tuple[int, int, str]]:
+        """Non-overlapping fixed-size windows."""
+        windows: list[tuple[int, int, str]] = []
         start = 0
         while start < len(text):
             end = min(start + size, len(text))
-            results.append((start, end, text[start:end]))
+            windows.append((start, end, text[start:end]))
             start = end
-        return results
+        return windows
 
-    def _overlap_chunks(
+    def _overlap_windows(
         self, text: str, size: int, overlap: int
     ) -> list[tuple[int, int, str]]:
         """Sliding-window chunks with configurable overlap."""
@@ -110,14 +108,13 @@ class TextChunker:
             raise ValueError(
                 f"chunk_overlap ({overlap}) must be less than chunk_size ({size})"
             )
-
-        results: list[tuple[int, int, str]] = []
+        windows: list[tuple[int, int, str]] = []
         step = size - overlap
         start = 0
         while start < len(text):
             end = min(start + size, len(text))
-            results.append((start, end, text[start:end]))
+            windows.append((start, end, text[start:end]))
             if end == len(text):
                 break
             start += step
-        return results
+        return windows
